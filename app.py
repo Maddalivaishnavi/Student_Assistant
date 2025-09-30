@@ -1,147 +1,131 @@
 import streamlit as st
-import requests
-from PIL import Image
-import io
-import json
 import os
 from dotenv import load_dotenv
-import folium
-from streamlit_folium import st_folium
-import time
+import requests
 
-# Load environment variables
+# --- 0. API Key Loading (Securely) ---
+# Load environment variables from .env file (for local development)
 load_dotenv()
+HF_API_KEY = os.getenv("HF_API_KEY")
 
-# Constants
-WIKIMEDIA_HEADERS = {'User-Agent': 'WikiYatra/1.0 (vaishnavi.maddali.project@example.com)'}
-OLLAMA_API_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL_ID = "gemma3"
+# Check if the API key is loaded
+if not HF_API_KEY:
+    st.error("Hugging Face API key (HF_API_KEY) not found. Please set it in your .env file or Streamlit secrets.")
+    st.stop() # Stop the app if no API key is available
 
-# --- Helper: Ollama Query ---
-def query_ollama(prompt):
+# --- 1. Hugging Face Inference API Configuration ---
+# CORRECTED: Use the v0.2 model which is generally available
+API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.3"
+headers = {"Authorization": f"Bearer {HF_API_KEY}"}
+
+# --- 2. Hugging Face API Call Function ---
+@st.cache_data(show_spinner=False) # Cache results to avoid re-calling API for same input
+def query_huggingface(prompt_instruction, model_name="Mistral-7B-Instruct-v0.2"):
+    """
+    Makes a call to the Hugging Face Inference API for text generation.
+    Uses the recommended chat template for Mistral-Instruct models.
+
+    Args:
+        prompt_instruction (str): The instruction/query for the model.
+        model_name (str): The name of the model being used (for better error messages).
+
+    Returns:
+        str: The generated text from the model or an error message.
+    """
     try:
-        response = requests.post(
-            OLLAMA_API_URL,
-            json={"model": OLLAMA_MODEL_ID, "prompt": prompt, "stream": False},
-            timeout=90
-        )
-        response.raise_for_status()
-        return response.json().get("response", "")
-    except Exception as e:
-        return f"❌ Ollama Error: {e}"
+        # Mistral-Instruct models typically use this format for optimal performance
+        formatted_prompt = f"<s>[INST] {prompt_instruction} [/INST]"
 
-# --- Helper: Wikipedia Fetch ---
-def fetch_wikipedia_content(title, lang="en"):
-    try:
-        summary_url = f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{title}"
-        response = requests.get(summary_url, headers=WIKIMEDIA_HEADERS, timeout=15)
-        if response.status_code == 200:
-            data = response.json()
-            summary = data.get("extract", "")
-            title = data.get("title", "")
-            description = data.get("description", "")
-            return summary, title, description
-        else:
-            return None, None, None
-    except Exception as e:
-        st.error(f"Wikipedia fetch error: {e}")
-        return None, None, None
+        payload = {
+            "inputs": formatted_prompt,
+            "parameters": {
+                "max_new_tokens": 512,
+                "temperature": 0.7,
+                "do_sample": True,
+                "top_p": 0.95
+            }
+        }
+        response = requests.post(API_URL, headers=headers, json=payload)
+        response.raise_for_status() # Raise an HTTPError for bad responses (4xx or 5xx)
 
-# --- Tabs ---
-tab1, tab2, tab_chat = st.tabs(["🌍 Destination Search", "🗺️ Route Planner", "💬 AI Chatbot"])
-
-# -------- Destination Search Tab --------
-with tab1:
-    st.header("🌍 Explore Indian Destinations")
-
-    destination = st.text_input("Enter a destination in India (e.g., Goa, Jaipur, Hampi)", "")
-    lang = st.text_input("Choose Language", value="en")
-
-    if destination:
-        with st.spinner("🔎 Searching Wikipedia..."):
-            summary, image_url, wiki_title = fetch_wikipedia_content(destination, lang)
-
-            # Fallback to English if no data found
-            if not summary:
-                st.warning(f"No data found for '{destination}' in '{lang}'. Trying English...")
-                summary, image_url, wiki_title = fetch_wikipedia_content(destination, "en")
-
-            # If still no summary found
-            if not summary:
-                st.error("❌ No data found. Please check the spelling or try another place.")
+        result = response.json()
+        if isinstance(result, list) and len(result) > 0 and "generated_text" in result[0]:
+            # The model generates text after the prompt. We want the text *after* our instruction.
+            # Splitting by "[/INST]" and taking the last part is a common way to get the response.
+            generated_text = result[0]["generated_text"]
+            # Remove the input prompt part
+            if "[/INST]" in generated_text:
+                return generated_text.split("[/INST]")[-1].strip()
             else:
-                st.subheader(f"📌 {wiki_title}")
-                st.markdown(summary)
-
-                if image_url:
-                    st.image(image_url, caption=wiki_title)
-
-# --- Tab 2: Route Planner (using Leaflet) ---
-with tab2:
-    st.header("🗺️ Plan Your Route in India")
-    origin = st.text_input("Enter starting location")
-    destination = st.text_input("Enter destination")
-
-    if st.button("Show Route"):
-        if origin and destination:
-            # Dummy coordinates for demo
-            origin_coords = [20.5937, 78.9629]  # India center
-            dest_coords = [21.1458, 79.0882]    # Nagpur
-
-            m = folium.Map(location=origin_coords, zoom_start=5)
-            folium.Marker(origin_coords, tooltip="Start", popup=origin, icon=folium.Icon(color='green')).add_to(m)
-            folium.Marker(dest_coords, tooltip="End", popup=destination, icon=folium.Icon(color='red')).add_to(m)
-            folium.PolyLine([origin_coords, dest_coords], color="blue", weight=2.5).add_to(m)
-            st_folium(m, width=700, height=500)
+                return generated_text.strip() # Fallback if format is unexpected
         else:
-            st.warning("Please enter both locations")
+            return f"❌ Error: Unexpected API response format: {result}"
 
-# --- Tab 3: AI Chatbot ---
-with tab_chat:
-    st.header("💬 AI Chatbot (Powered by Ollama + Wikipedia)")
-    st.write("Ask about any Indian place (e.g., 'Tell me about Hampi', 'Best places in Kerala')")
+    except requests.exceptions.HTTPError as e:
+        status_code = e.response.status_code
+        if status_code == 404:
+            return f"❌ Error 404: Model '{model_name}' not found at {API_URL}. Please double-check the model ID and its availability on Hugging Face."
+        elif status_code == 401:
+            return "❌ Error 401: Unauthorized. Please check your Hugging Face API token (HF_API_KEY)."
+        elif status_code == 503:
+            return f"❌ Error 503: Service Unavailable. The model '{model_name}' is currently loading or busy. Please try again in a moment."
+        else:
+            return f"❌ HTTP Error {status_code}: {e.response.text}"
+    except requests.exceptions.ConnectionError as e:
+        return f"❌ Connection Error: Could not connect to Hugging Face API. Please check your internet connection. Details: {e}"
+    except Exception as e:
+        return f"❌ An unexpected error occurred during API call: {e}"
 
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []
+# --- 3. Streamlit UI ---
+st.set_page_config(page_title="AI Student Assistant (Hugging Face)", page_icon="🎓", layout="wide")
+st.title("🤖 AI Student Assistant (Free - Hugging Face)")
+st.markdown("---")
 
-    for msg in st.session_state.chat_history:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+st.sidebar.header("App Features")
+option = st.sidebar.selectbox("Choose a feature", [
+    "📚 Summarize Text",
+    "💡 Explain Concept",
+    "📝 Generate Model Questions",
+    "🧠 Generate Quiz Questions"
+])
 
-    user_input = st.chat_input("Ask a question about Indian destinations...")
+st.subheader("Input Text / Topic")
+user_input = st.text_area("Enter your text or topic here:", height=200)
 
-    if user_input:
-        st.session_state.chat_history.append({"role": "user", "content": user_input})
-        with st.chat_message("user"):
-            st.markdown(user_input)
+if st.button("Get AI Assistance", use_container_width=True):
+    if user_input.strip() == "":
+        st.warning("⚠ Please enter some text or a topic.")
+    else:
+        # Use a spinner for better user experience while AI is processing
+        with st.spinner(f"Generating {option.lower().replace('📚 ', '').replace('💡 ', '').replace('📝 ', '').replace('🧠 ', '')}..."):
+            prompt = ""
+            if option == "📚 Summarize Text":
+                # Changed to "text" instead of "topic" to be more accurate for summarization
+                prompt = f"Summarize the following text concisely and accurately, highlighting the main points:\n\n{user_input}"
+            elif option == "💡 Explain Concept":
+                prompt = f"Explain the following concept in simple, easy-to-understand terms for a student:\n\nConcept: {user_input}"
+            elif option == "📝 Generate Model Questions":
+                prompt = f"Generate 5 detailed model exam/essay questions for the topic '{user_input}'. Ensure the questions are open-ended and require analytical answers. Format them as a numbered list."
+            elif option == "🧠 Generate Quiz Questions":
+                prompt = f"""Create 3 multiple-choice questions (MCQs) with 4 options each, and 2 true/false questions on the topic '{user_input}'.
+                For MCQs, clearly indicate the correct option (A, B, C, or D).
+                For True/False questions, clearly state 'True' or 'False'.
 
-        with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
-                try:
-                    identify_prompt = (
-                        f"Identify the Indian tourist destination in the question below. "
-                        f"Return just the name of the place. If no valid place is found, return 'NONE'.\n\n"
-                        f"Question: {user_input}"
-                    )
-                    place = query_ollama(identify_prompt).strip()
+                Format your output strictly as follows:
+                1. MCQ Question 1
+                   a) Option A
+                   b) Option B
+                   c) Option C
+                   d) Option D
+                   Correct Answer: [Option Letter, e.g., C]
 
-                    if place.lower() == "none" or not place:
-                        reply = "I'm sorry, I couldn't identify a specific Indian destination in your question."
-                    else:
-                        wiki_summary, wiki_title, wiki_desc = fetch_wikipedia_content(place, lang="en")
+                2. True/False Question 1
+                   Answer: [True/False]
+                """
+            
+            result = query_huggingface(prompt)
+            st.subheader(f"🧾 Result: {option.replace('📚 ', '').replace('💡 ', '').replace('📝 ', '').replace('🧠 ', '')}")
+            st.write(result)
 
-                        if not wiki_summary:
-                            reply = f"❌ I couldn't find info for **{place}**. Try another."
-                        else:
-                            answer_prompt = (
-                                f"The user asked: '{user_input}'.\n\n"
-                                f"Here is some background info from Wikipedia about {place}:\n\n"
-                                f"{wiki_summary}\n\n"
-                                f"Based on this, answer the user's question clearly and helpfully."
-                            )
-                            reply = query_ollama(answer_prompt).strip()
-                except Exception as e:
-                    reply = f"❌ Ollama Error: {e}"
-
-                st.markdown(reply)
-                st.session_state.chat_history.append({"role": "assistant", "content": reply})
+st.markdown("---")
+st.caption("Powered by Mistral-7B-Instruct-v0.2 via Hugging Face Inference API.")
