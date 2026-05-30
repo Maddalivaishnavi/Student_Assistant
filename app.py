@@ -54,7 +54,7 @@ def query_gemini(prompt_instruction, model_name="gemini-2.5-flash"):
 
 # --- 3. Streamlit UI ---
 st.set_page_config(page_title="AI Student Assistant (Gemini)", page_icon="🎓", layout="wide")
-st.title("🤖 AI Student Assistant (Free Tier - Gemini API)")
+st.title("🤖 AI Student Assistant")
 st.markdown("---")
 
 st.sidebar.header("App Features")
