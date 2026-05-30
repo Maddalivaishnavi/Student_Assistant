@@ -69,4 +69,6 @@ AI-Student-Assistant/
 ├── .env.example
 └── README.md
 ```
+##Deployed version:
+https://studentassistant-zswt7zzgzr2jrnzhnypetz.streamlit.app/
 
